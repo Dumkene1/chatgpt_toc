@@ -1,0 +1,99 @@
+#cgpt-toc{
+  position:fixed;top:80px;right:16px;width:320px;max-height:80vh;
+  background:rgba(15,15,20,.95);color:#fff;border:1px solid rgba(255,255,255,.12);
+  border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.3);z-index:999999;
+  display:flex;flex-direction:column;overflow:auto;
+  font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial;
+
+  resize: both;
+  min-width: 260px;
+  min-height: 140px;
+  max-width: 60vw;
+  max-height: 80vh;
+}
+
+#cgpt-toc-header{
+  display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:move;user-select:none;
+  background:rgba(255,255,255,.06);border-bottom:1px solid rgba(255,255,255,.08)
+}
+
+#cgpt-toc-title{font-weight:600;flex:1}
+
+#cgpt-toc-controls{display:flex;gap:4px;align-items:center}
+#cgpt-toc-controls button{
+  background:transparent;color:inherit;border:none;padding:4px 6px;cursor:pointer;border-radius:6px;
+  font-weight:700;
+}
+#cgpt-toc-controls button:hover{background:rgba(255,255,255,.10)}
+
+#cgpt-toc-list{overflow:auto;padding:8px 10px}
+
+#cgpt-toc-list ol{list-style:none;margin:0;padding:0}
+#cgpt-toc-list li{
+  margin:2px 0;padding:4px 6px;border-radius:6px;cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis
+}
+#cgpt-toc-list li:hover{background:rgba(255,255,255,.08)}
+#cgpt-toc-list li[data-level="1"]{padding-left:4px;font-weight:600}
+#cgpt-toc-list li[data-level="2"]{padding-left:16px}
+#cgpt-toc-list li[data-level="3"]{padding-left:28px}
+#cgpt-toc-list li[data-level="4"]{padding-left:40px}
+#cgpt-toc-list li[data-level="5"]{padding-left:52px}
+#cgpt-toc-list li[data-level="6"]{padding-left:64px}
+
+.cgpt-pulse{
+  animation:cgptPulse 1.2s ease-out 1;
+  outline:2px solid #6aa9ff;outline-offset:2px;border-radius:10px
+}
+@keyframes cgptPulse{
+  0%{box-shadow:0 0 0 0 rgba(106,169,255,.6)}
+  100%{box-shadow:0 0 0 16px rgba(106,169,255,0)}
+}
+h1[id],h2[id],h3[id],h4[id],h5[id],h6[id]{scroll-margin-top:90px}
+
+/* ✅ Minimize: only hide the list, keep header visible */
+#cgpt-toc.cgpt-min #cgpt-toc-list{
+  display:none;
+}
+#cgpt-toc.cgpt-min{
+  resize:none;
+  min-height:auto;
+  height:auto;
+  max-height:none;
+  overflow:hidden;
+}
+
+/* Toggle button */
+#cgpt-toc-toggle{
+  position:fixed;right:16px;bottom:16px;z-index:999999;
+  background:rgba(15,15,20,.95);color:#fff;border:1px solid rgba(255,255,255,.12);
+  border-radius:999px;padding:10px 14px;font-weight:700;cursor:pointer;
+  box-shadow:0 8px 24px rgba(0,0,0,.3)
+}
+#cgpt-toc-toggle:hover{filter:brightness(1.1)}
+
+/* Toast */
+#cgpt-toc-toast{
+  position:fixed;right:16px;bottom:64px;z-index:999999;
+  background:rgba(15,15,20,.92);color:#fff;border:1px solid rgba(255,255,255,.12);
+  border-radius:12px;padding:10px 12px;box-shadow:0 8px 24px rgba(0,0,0,.3);
+  max-width:340px;opacity:0;transition:opacity 150ms ease;
+  font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial;
+}
+
+/* Extra resize handle: bottom-left */
+#cgpt-toc .cgpt-resize-bl {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nesw-resize;
+  /* invisible but still easy to grab */
+  background: transparent;
+}
+
+/* Optional: tiny visual hint on hover */
+#cgpt-toc .cgpt-resize-bl:hover {
+  background: rgba(0,0,0,0.06);
+}
