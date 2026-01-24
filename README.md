@@ -6,7 +6,7 @@ Built for **long technical chats** where scrolling becomes painful.
 
 ## Screenshots
 
-### Floating TOC
+### Floating TOC with chatgpt chat
 
 ![TOC panel](sc1.png)
 
