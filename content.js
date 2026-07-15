@@ -1,73 +1,112 @@
-// content.js — ChatGPT TOC Navigator
-// Includes assistant headings + user messages in one live, draggable, resizable TOC.
+// content.js — ChatGPT TOC
+// Live conversation navigation for user prompts and assistant headings.
 
 (function () {
-  // -------------------- tiny utils --------------------
-  const $ = (sel, root = document) => root.querySelector(sel);
-  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const clamp = (n, a, b) => Math.min(Math.max(n, a), b);
+  'use strict';
 
-  function sanitize(text) {
-    return (text || "").replace(/\s+/g, " ").trim().slice(0, 180);
+  // -------------------- utilities --------------------
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+  function sanitize(text, maxLength = 180) {
+    return (text || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
   }
 
-  function summarizeFallback(el) {
-    if (!el) return "Section";
-    const strong = el.querySelector("strong,b");
-    if (strong && strong.textContent.trim().length >= 6) return sanitize(strong.textContent);
-    const li = el.querySelector("li");
-    if (li) return sanitize(li.textContent);
-    const txt = el.textContent || "";
-    const sentence = txt.split(/(?<=[.!?])\s+/)[0] || txt.slice(0, 80);
-    return sanitize(sentence || "Section");
+  function summarizeFallback(element) {
+    if (!element) return 'Section';
+
+    const strong = element.querySelector('strong, b');
+    if (strong && strong.textContent.trim().length >= 6) {
+      return sanitize(strong.textContent);
+    }
+
+    const listItem = element.querySelector('li');
+    if (listItem) return sanitize(listItem.textContent);
+
+    const text = element.textContent || '';
+    const sentence = text.split(/(?<=[.!?])\s+/)[0] || text.slice(0, 80);
+    return sanitize(sentence || 'Section');
   }
 
-  function summarizeUserMessage(el) {
-    if (!el) return "You";
-    const txt = sanitize(el.textContent || "");
-    if (!txt) return "You";
-    return txt.length > 120 ? txt.slice(0, 117) + "..." : txt;
+  function summarizeUserMessage(element) {
+    if (!element) return 'You';
+    const text = sanitize(element.textContent || '', 120);
+    return text || 'You';
   }
 
   function uniqueSortByDomOrder(nodes) {
     const seen = new Set();
-    const arr = [];
-    nodes.forEach(n => {
-      if (n && !seen.has(n)) {
-        seen.add(n);
-        arr.push(n);
+    const unique = [];
+
+    nodes.forEach(node => {
+      if (node && !seen.has(node)) {
+        seen.add(node);
+        unique.push(node);
       }
     });
-    arr.sort((a, b) => {
+
+    unique.sort((a, b) => {
       if (a === b) return 0;
-      const pos = a.compareDocumentPosition(b);
-      if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-      if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      const position = a.compareDocumentPosition(b);
+      if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
       return 0;
     });
-    return arr;
+
+    return unique;
   }
 
-  // -------------------- message detection --------------------
+  function createButton(label, title, onClick, className = '') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    if (className) button.className = className;
+
+    button.addEventListener('mousedown', event => event.stopPropagation());
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      onClick(event);
+    });
+
+    return button;
+  }
+
+  // -------------------- state --------------------
+  let lastBuildKey = '';
+  let debounceTimer = null;
+  let currentUrl = location.href;
+  let currentFilter = 'all';
+  let currentQuery = '';
+  let allEntries = [];
+  let activeEntryId = '';
+  let activeUpdatePending = false;
+  let chatMutationObserver = null;
+  let urlPollTimer = null;
+
+  // -------------------- conversation detection --------------------
   function getAssistantBlocks() {
     const set = new Set();
 
-    $$('article[role="article"]').forEach(a => {
-      const roleEl = a.querySelector('[data-message-author-role="assistant"]');
-      if (roleEl) {
-        set.add(roleEl);
-      } else if (a.matches('[data-message-author-role="assistant"]')) {
-        set.add(a);
+    $$('article[role="article"]').forEach(article => {
+      const roleNode = article.querySelector('[data-message-author-role="assistant"]');
+      if (roleNode) {
+        set.add(roleNode);
+      } else if (article.matches('[data-message-author-role="assistant"]')) {
+        set.add(article);
       }
     });
 
-    $$('[data-message-author-role="assistant"]').forEach(el => set.add(el));
+    $$('[data-message-author-role="assistant"]').forEach(node => set.add(node));
 
-    // fallback
-    $$('.markdown, .prose').forEach(el => {
-      const assistantContainer = el.closest('[data-message-author-role="assistant"]');
-      if (assistantContainer) set.add(assistantContainer);
+    // Fallback for ChatGPT layouts where the markdown container is easier to locate.
+    $$('.markdown, .prose').forEach(node => {
+      const assistant = node.closest('[data-message-author-role="assistant"]');
+      if (assistant) set.add(assistant);
     });
 
     return uniqueSortByDomOrder(Array.from(set));
@@ -76,46 +115,50 @@
   function getUserBlocks() {
     const set = new Set();
 
-    $$('article[role="article"]').forEach(a => {
-      const roleEl = a.querySelector('[data-message-author-role="user"]');
-      if (roleEl) {
-        set.add(roleEl);
-      } else if (a.matches('[data-message-author-role="user"]')) {
-        set.add(a);
+    $$('article[role="article"]').forEach(article => {
+      const roleNode = article.querySelector('[data-message-author-role="user"]');
+      if (roleNode) {
+        set.add(roleNode);
+      } else if (article.matches('[data-message-author-role="user"]')) {
+        set.add(article);
       }
     });
 
-    $$('[data-message-author-role="user"]').forEach(el => set.add(el));
+    $$('[data-message-author-role="user"]').forEach(node => set.add(node));
 
     return uniqueSortByDomOrder(Array.from(set));
   }
 
   function getAllConversationBlocks() {
-    const assistant = getAssistantBlocks().map(node => ({ kind: "assistant", node }));
-    const user = getUserBlocks().map(node => ({ kind: "user", node }));
-    return uniqueSortByDomOrder([...assistant.map(x => x.node), ...user.map(x => x.node)]).map(node => {
-      const kind = node.getAttribute('data-message-author-role') === 'user' ? 'user' : 'assistant';
-      return { kind, node };
-    });
+    const assistantNodes = getAssistantBlocks();
+    const userNodes = getUserBlocks();
+    const nodes = uniqueSortByDomOrder([...assistantNodes, ...userNodes]);
+
+    return nodes.map(node => ({
+      kind: node.getAttribute('data-message-author-role') === 'user' ? 'user' : 'assistant',
+      node
+    }));
   }
 
-  // -------------------- heading extraction --------------------
+  // -------------------- entry extraction --------------------
   function findAssistantHeadings(block) {
-    const hs = $$('h1,h2,h3,h4,h5,h6', block).map(h => ({
-      level: Number(h.tagName.slice(1)),
-      text: sanitize(h.textContent),
-      node: h,
-      type: "assistant"
-    })).filter(h => h.text.length);
+    const headings = $$('h1, h2, h3, h4, h5, h6', block)
+      .map(heading => ({
+        level: Number(heading.tagName.slice(1)),
+        text: sanitize(heading.textContent),
+        node: heading,
+        type: 'assistant'
+      }))
+      .filter(entry => entry.text.length > 0);
 
-    if (hs.length) return hs;
+    if (headings.length) return headings;
 
     const content = block.querySelector('.markdown, .prose, [data-testid="conversation-turn"]') || block;
     return [{
       level: 2,
       text: summarizeFallback(content),
       node: content,
-      type: "assistant"
+      type: 'assistant'
     }];
   }
 
@@ -128,229 +171,116 @@
       level: 1,
       text: `➜ You: ${summarizeUserMessage(content)}`,
       node: content,
-      type: "user"
+      type: 'user'
     };
   }
 
-  function ensureAnchor(node, base, i) {
+  function ensureAnchor(node, base, index) {
     let target = node;
 
-    if (!/^(H[1-6])$/.test((target.tagName || "").toUpperCase())) {
-      target = node.closest('[data-message-author-role],article,section,div') || node;
+    if (!/^(H[1-6])$/.test((target.tagName || '').toUpperCase())) {
+      target = node.closest('[data-message-author-role], article, section, div') || node;
     }
 
     if (!target.id) {
-      target.id = `${base}-${i}-${Math.random().toString(36).slice(2, 8)}`;
+      target.id = `${base}-${index}-${Math.random().toString(36).slice(2, 8)}`;
     }
 
     return target.id;
   }
 
-  // -------------------- panel UI --------------------
-  function injectStylesOnce() {
-    if ($('#cgpt-toc-style')) return;
+  function collectEntries() {
+    const blocks = getAllConversationBlocks();
+    const entries = [];
 
-    const s = document.createElement('style');
-    s.id = 'cgpt-toc-style';
-    s.textContent = `
-      #cgpt-toc{
-        position:fixed;
-        top:80px;
-        right:16px;
-        width:320px;
-        max-height:80vh;
-        background:rgba(15,15,20,.95);
-        color:#fff;
-        border:1px solid rgba(255,255,255,.12);
-        border-radius:12px;
-        box-shadow:0 8px 24px rgba(0,0,0,.3);
-        z-index:999999;
-        display:flex;
-        flex-direction:column;
-        overflow:auto;
-        font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial;
-        resize: both;
-        min-width:240px;
-        min-height:120px;
-        max-width:50vw;
-        max-height:80vh;
-        box-sizing:border-box;
-      }
-      #cgpt-toc.min{
-        height:38px;
-        min-height:38px;
-        resize:none;
-        overflow:hidden;
-      }
-      #cgpt-toc.min #cgpt-toc-list{
-        display:none;
-      }
-      #cgpt-toc-header{
-        display:flex;
-        align-items:center;
-        gap:8px;
-        padding:8px 10px;
-        cursor:move;
-        user-select:none;
-        background:rgba(255,255,255,.06);
-        border-bottom:1px solid rgba(255,255,255,.08)
-      }
-      #cgpt-toc-title{
-        font-weight:600;
-        flex:1
-      }
-      #cgpt-toc-list{
-        overflow:auto;
-        padding:8px 10px
-      }
-      #cgpt-toc-list ol{
-        list-style:none;
-        margin:0;
-        padding:0
-      }
-      #cgpt-toc-list li{
-        margin:2px 0;
-        padding:4px 6px;
-        border-radius:6px;
-        cursor:pointer;
-        white-space:nowrap;
-        overflow:hidden;
-        text-overflow:ellipsis
-      }
-      #cgpt-toc-list li:hover{
-        background:rgba(255,255,255,.08)
-      }
-      #cgpt-toc-list li[data-level="1"]{
-        padding-left:4px;
-        font-weight:600
-      }
-      #cgpt-toc-list li[data-level="2"]{ padding-left:16px }
-      #cgpt-toc-list li[data-level="3"]{ padding-left:28px }
-      #cgpt-toc-list li[data-level="4"]{ padding-left:40px }
-      #cgpt-toc-list li[data-level="5"]{ padding-left:52px }
-      #cgpt-toc-list li[data-level="6"]{ padding-left:64px }
+    blocks.forEach((item, blockIndex) => {
+      const block = item.node;
+      const base = block.id || `cgpt-msg-${blockIndex}`;
+      if (!block.id) block.id = base;
 
-      /* user entries */
-            #cgpt-toc-list li.cgpt-user-entry{
-        color:rgba(0, 153, 255, 0.88);
-        font-style:italic;
-        border-left:2px solid rgba(115, 0, 255, 0.45);
-        background:rgba(0, 46, 70, 0.08);
+      if (item.kind === 'user') {
+        const userEntry = findUserEntry(block);
+        const id = ensureAnchor(userEntry.node, `${base}-user`, 0);
+        entries.push({
+          level: 1,
+          text: userEntry.text,
+          id,
+          type: 'user',
+          order: blockIndex
+        });
+        return;
       }
 
-      .cgpt-pulse{
-        animation:cgptPulse 1.2s ease-out 1;
-        outline:2px solid #6aa9ff;
-        outline-offset:2px;
-        border-radius:10px
-      }
-      @keyframes cgptPulse{
-        0%{ box-shadow:0 0 0 0 rgba(106,169,255,.6) }
-        100%{ box-shadow:0 0 0 16px rgba(106,169,255,0) }
-      }
+      findAssistantHeadings(block).forEach((heading, headingIndex) => {
+        const id = ensureAnchor(heading.node, `${base}-assistant`, headingIndex);
+        entries.push({
+          level: clamp(heading.level || 2, 1, 6),
+          text: heading.text,
+          id,
+          type: 'assistant',
+          order: blockIndex
+        });
+      });
+    });
 
-      h1[id],h2[id],h3[id],h4[id],h5[id],h6[id]{
-        scroll-margin-top:90px
-      }
-
-      #cgpt-toc-toggle{
-        position:fixed;
-        right:16px;
-        bottom:16px;
-        z-index:999999;
-        background:rgba(15,15,20,.95);
-        color:#fff;
-        border:1px solid rgba(255,255,255,.12);
-        border-radius:999px;
-        padding:10px 14px;
-        font-weight:600;
-        cursor:pointer;
-        box-shadow:0 8px 24px rgba(0,0,0,.3)
-      }
-      #cgpt-toc-toggle:hover{
-        filter:brightness(1.1)
-      }
-
-      /* custom bottom-left resize grip */
-      #cgpt-toc-left-resize{
-        position:absolute;
-        left:0;
-        bottom:0;
-        width:16px;
-        height:16px;
-        cursor:sw-resize;
-        z-index:2;
-      }
-      #cgpt-toc-left-resize::before{
-        content:"";
-        position:absolute;
-        left:3px;
-        bottom:3px;
-        width:10px;
-        height:10px;
-        border-left:2px solid rgba(255,255,255,.45);
-        border-bottom:2px solid rgba(255,255,255,.45);
-        border-bottom-left-radius:2px;
-      }
-
-
-
-
-    `;
-    document.head.appendChild(s);
+    return entries;
   }
 
-  function makeButton(label, title, onClick) {
-    const b = document.createElement('button');
-    b.textContent = label;
-    b.title = title;
-    b.style.background = 'transparent';
-    b.style.color = 'inherit';
-    b.style.border = 'none';
-    b.style.padding = '4px 6px';
-    b.style.cursor = 'pointer';
-    b.style.borderRadius = '6px';
-    b.addEventListener('mouseenter', () => b.style.background = 'rgba(255,255,255,0.1)');
-    b.addEventListener('mouseleave', () => b.style.background = 'transparent');
-    b.addEventListener('mousedown', (e) => {
-      e.stopPropagation();
+  // -------------------- panel creation --------------------
+  function createToolbar() {
+    const toolbar = document.createElement('div');
+    toolbar.id = 'cgpt-toc-toolbar';
+
+    const search = document.createElement('input');
+    search.id = 'cgpt-toc-search';
+    search.type = 'search';
+    search.placeholder = 'Search TOC…';
+    search.setAttribute('aria-label', 'Search table of contents');
+    search.value = currentQuery;
+    search.addEventListener('input', () => {
+      currentQuery = search.value.trim().toLowerCase();
+      renderEntries();
     });
-    b.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onClick(e);
+
+    const filters = document.createElement('div');
+    filters.id = 'cgpt-toc-filters';
+    filters.setAttribute('role', 'group');
+    filters.setAttribute('aria-label', 'Filter table of contents');
+
+    [
+      ['all', 'All'],
+      ['user', 'You'],
+      ['assistant', 'Replies']
+    ].forEach(([value, label]) => {
+      const button = createButton(label, `Show ${label.toLowerCase()} entries`, () => {
+        currentFilter = value;
+        updateFilterButtons();
+        renderEntries();
+      }, 'cgpt-toc-filter');
+      button.dataset.filter = value;
+      filters.append(button);
     });
-    return b;
-  }
 
+    const navigation = document.createElement('div');
+    navigation.id = 'cgpt-toc-navigation';
 
-  function toggleMinimize(panel) {
-    const list = $('#cgpt-toc-list', panel);
-    const isMin = panel.classList.contains('min');
+    const firstButton = createButton('↑ First', 'Jump to beginning of conversation', () => {
+      jumpToFirstConversationTurn();
+    }, 'cgpt-toc-nav-button');
 
-    if (isMin) {
-      panel.classList.remove('min');
-      const restoreHeight = panel.dataset.restoreHeight || '';
-      if (restoreHeight) {
-        panel.style.height = restoreHeight;
-      } else {
-        panel.style.removeProperty('height');
-      }
-      if (list) list.style.removeProperty('display');
-      panel.dataset.minimized = '0';
-      return;
-    }
+    const latestButton = createButton('↓ Latest', 'Jump to latest conversation entry', () => {
+      const latestEntry = allEntries[allEntries.length - 1];
+      if (latestEntry) navigateToEntry(latestEntry);
+    }, 'cgpt-toc-nav-button');
 
-    const rect = panel.getBoundingClientRect();
-    panel.dataset.restoreHeight = `${Math.round(rect.height)}px`;
-    panel.classList.add('min');
-    panel.style.height = '38px';
-    if (list) list.style.display = 'none';
-    panel.dataset.minimized = '1';
+    navigation.append(firstButton, latestButton);
+    toolbar.append(search, filters, navigation);
+    return toolbar;
   }
 
   function createPanel() {
-    if ($('#cgpt-toc')) return $('#cgpt-toc');
-    injectStylesOnce();
+    const existing = $('#cgpt-toc');
+    if (existing) return existing;
 
     const existingToggle = $('#cgpt-toc-toggle');
     if (existingToggle) existingToggle.remove();
@@ -359,12 +289,12 @@
     panel.id = 'cgpt-toc';
 
     try {
-      const sz = JSON.parse(localStorage.getItem('cgpt_toc_size') || '{}');
-      if (sz && typeof sz === 'object') {
-        if (sz.w) panel.style.width = `${sz.w}px`;
-        if (sz.h) panel.style.height = `${sz.h}px`;
+      const savedSize = JSON.parse(localStorage.getItem('cgpt_toc_size') || '{}');
+      if (savedSize && typeof savedSize === 'object') {
+        if (savedSize.w) panel.style.width = `${savedSize.w}px`;
+        if (savedSize.h) panel.style.height = `${savedSize.h}px`;
       }
-    } catch {}
+    } catch (_) {}
 
     const header = document.createElement('div');
     header.id = 'cgpt-toc-header';
@@ -374,96 +304,124 @@
     title.textContent = 'Chat TOC';
 
     const controls = document.createElement('div');
+    controls.id = 'cgpt-toc-controls';
 
-    const btnMin = makeButton('–', 'Minimize', () => {
-      toggleMinimize(panel);
-    });
+    const refreshButton = createButton('↻', 'Refresh TOC', () => forceRebuild());
+    const minimizeButton = createButton('–', 'Minimize', () => toggleMinimize(panel));
+    const closeButton = createButton('×', 'Close', () => closePanel());
 
-    const btnClose = makeButton('×', 'Close', () => {
-      panel.remove();
-      lastKey = '';
-      showStub();
-      sessionStorage.setItem('cgpt_toc_closed', '1');
-    });
-
-    controls.append(btnMin, btnClose);
+    controls.append(refreshButton, minimizeButton, closeButton);
     header.append(title, controls);
     panel.append(header);
 
+    const body = document.createElement('div');
+    body.id = 'cgpt-toc-body';
+    body.append(createToolbar());
+
     const list = document.createElement('div');
     list.id = 'cgpt-toc-list';
-    panel.append(list);
+    body.append(list);
 
+    const status = document.createElement('div');
+    status.id = 'cgpt-toc-status';
+    status.setAttribute('aria-live', 'polite');
+    body.append(status);
 
+    panel.append(body);
 
     const leftResizeGrip = document.createElement('div');
     leftResizeGrip.id = 'cgpt-toc-left-resize';
     panel.append(leftResizeGrip);
 
-
     panel.classList.remove('min');
     panel.dataset.minimized = '0';
-    list.style.removeProperty('display');
 
     document.documentElement.append(panel);
 
     makeDraggable(panel, header);
     setupResizePersistence(panel);
     setupLeftResize(panel, leftResizeGrip);
+    updateFilterButtons();
 
     return panel;
   }
 
-  function showStub() {
-    if ($('#cgpt-toc-toggle')) return;
-    const t = document.createElement('button');
-    t.id = 'cgpt-toc-toggle';
-    t.type = 'button';
-    t.textContent = 'TOC';
-
-    const reopenTOC = (e) => {
-      if (e) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-      t.remove();
-      lastKey = '';
-      sessionStorage.removeItem('cgpt_toc_closed');
-      createPanel();
-      rebuildTOC();
-    };
-
-    t.addEventListener('mousedown', reopenTOC);
-    t.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') reopenTOC(e);
-    });
-
-    document.documentElement.append(t);
+  function closePanel() {
+    const panel = $('#cgpt-toc');
+    if (panel) panel.remove();
+    lastBuildKey = '';
+    sessionStorage.setItem('cgpt_toc_closed', '1');
+    showStub();
   }
 
-  function makeDraggable(box, handle) {
-    let dragging = false, sx = 0, sy = 0, sl = 0, st = 0;
+  function showStub() {
+    if ($('#cgpt-toc-toggle')) return;
 
-    handle.addEventListener('mousedown', (e) => {
-      if (e.target.closest('button') || e.target.closest('#cgpt-toc-left-resize')) {
-        return;
+    const toggle = document.createElement('button');
+    toggle.id = 'cgpt-toc-toggle';
+    toggle.type = 'button';
+    toggle.textContent = 'TOC';
+    toggle.setAttribute('aria-label', 'Open Chat TOC');
+
+    const reopen = event => {
+      if (event) {
+        event.preventDefault();
+        event.stopPropagation();
       }
+      toggle.remove();
+      sessionStorage.removeItem('cgpt_toc_closed');
+      lastBuildKey = '';
+      createPanel();
+      forceRebuild();
+    };
+
+    toggle.addEventListener('click', reopen);
+    document.documentElement.append(toggle);
+  }
+
+  function toggleMinimize(panel) {
+    const isMinimized = panel.classList.contains('min');
+
+    if (isMinimized) {
+      panel.classList.remove('min');
+      const restoreHeight = panel.dataset.restoreHeight || '';
+      if (restoreHeight) panel.style.height = restoreHeight;
+      else panel.style.removeProperty('height');
+      panel.dataset.minimized = '0';
+      return;
+    }
+
+    const rect = panel.getBoundingClientRect();
+    panel.dataset.restoreHeight = `${Math.round(rect.height)}px`;
+    panel.classList.add('min');
+    panel.style.height = '38px';
+    panel.dataset.minimized = '1';
+  }
+
+  // -------------------- dragging and resizing --------------------
+  function makeDraggable(box, handle) {
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    handle.addEventListener('mousedown', event => {
+      if (event.target.closest('button') || event.target.closest('#cgpt-toc-left-resize')) return;
 
       dragging = true;
-      sx = e.clientX;
-      sy = e.clientY;
-      const r = box.getBoundingClientRect();
-      sl = r.left;
-      st = r.top;
-      e.preventDefault();
+      startX = event.clientX;
+      startY = event.clientY;
+      const rect = box.getBoundingClientRect();
+      startLeft = rect.left;
+      startTop = rect.top;
+      event.preventDefault();
     });
 
-    window.addEventListener('mousemove', (e) => {
+    window.addEventListener('mousemove', event => {
       if (!dragging) return;
-      const dx = e.clientX - sx;
-      const dy = e.clientY - sy;
-      box.style.left = `${sl + dx}px`;
-      box.style.top = `${st + dy}px`;
+      box.style.left = `${startLeft + event.clientX - startX}px`;
+      box.style.top = `${startTop + event.clientY - startY}px`;
       box.style.right = 'auto';
       box.style.bottom = 'auto';
     });
@@ -476,212 +434,414 @@
   function setupResizePersistence(panel) {
     if (!('ResizeObserver' in window)) return;
 
-    const ro = new ResizeObserver((entries) => {
-      const r = entries[0]?.contentRect;
-      if (!r) return;
-      const w = Math.round(r.width);
-      const h = Math.round(r.height);
-      if (panel.classList.contains('min') || panel.dataset.minimized === '1') return;
+    const observer = new ResizeObserver(entries => {
+      const rect = entries[0]?.contentRect;
+      if (!rect || panel.classList.contains('min') || panel.dataset.minimized === '1') return;
+
       try {
-        localStorage.setItem('cgpt_toc_size', JSON.stringify({ w, h }));
-      } catch {}
+        localStorage.setItem('cgpt_toc_size', JSON.stringify({
+          w: Math.round(rect.width),
+          h: Math.round(rect.height)
+        }));
+      } catch (_) {}
     });
 
-    ro.observe(panel);
+    observer.observe(panel);
   }
 
-
-    function setupLeftResize(panel, grip) {
+  function setupLeftResize(panel, grip) {
     let resizing = false;
     let startX = 0;
     let startY = 0;
     let startWidth = 0;
     let startHeight = 0;
     let startLeft = 0;
-    let startTop = 0;
 
-    grip.addEventListener('mousedown', (e) => {
+    grip.addEventListener('mousedown', event => {
+      if (panel.classList.contains('min')) return;
+
       resizing = true;
-      startX = e.clientX;
-      startY = e.clientY;
+      startX = event.clientX;
+      startY = event.clientY;
 
       const rect = panel.getBoundingClientRect();
       startWidth = rect.width;
       startHeight = rect.height;
       startLeft = rect.left;
-      startTop = rect.top;
 
       panel.style.right = 'auto';
       panel.style.bottom = 'auto';
-      panel.style.left = `${startLeft}px`;
-      panel.style.top = `${startTop}px`;
+      panel.style.left = `${rect.left}px`;
+      panel.style.top = `${rect.top}px`;
 
-      e.preventDefault();
-      e.stopPropagation();
+      event.preventDefault();
+      event.stopPropagation();
     });
 
-    window.addEventListener('mousemove', (e) => {
+    window.addEventListener('mousemove', event => {
       if (!resizing) return;
 
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-
-      const newWidth = startWidth - dx;
-      const newHeight = startHeight + dy;
-      const newLeft = startLeft + dx;
-
-      const minWidth = 240;
-      const minHeight = 120;
+      const deltaX = event.clientX - startX;
+      const deltaY = event.clientY - startY;
       const maxWidth = Math.floor(window.innerWidth * 0.5);
       const maxHeight = Math.floor(window.innerHeight * 0.8);
+      const width = clamp(startWidth - deltaX, 240, maxWidth);
+      const height = clamp(startHeight + deltaY, 120, maxHeight);
+      const left = startLeft + (startWidth - width);
 
-      const clampedWidth = Math.min(Math.max(newWidth, minWidth), maxWidth);
-      const clampedHeight = Math.min(Math.max(newHeight, minHeight), maxHeight);
-
-      // keep left edge aligned properly when width is clamped
-      const appliedLeft = startLeft + (startWidth - clampedWidth);
-
-      panel.style.width = `${clampedWidth}px`;
-      panel.style.height = `${clampedHeight}px`;
-      panel.style.left = `${appliedLeft}px`;
+      panel.style.width = `${width}px`;
+      panel.style.height = `${height}px`;
+      panel.style.left = `${left}px`;
     });
 
     window.addEventListener('mouseup', () => {
       if (!resizing) return;
       resizing = false;
 
-      if (panel.classList.contains('min') || panel.dataset.minimized === '1') return;
-
       try {
         localStorage.setItem('cgpt_toc_size', JSON.stringify({
           w: Math.round(panel.getBoundingClientRect().width),
           h: Math.round(panel.getBoundingClientRect().height)
         }));
-      } catch {}
+      } catch (_) {}
     });
   }
 
+  // -------------------- rendering --------------------
+  function updateFilterButtons() {
+    $$('#cgpt-toc-filters .cgpt-toc-filter').forEach(button => {
+      const selected = button.dataset.filter === currentFilter;
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-pressed', String(selected));
+    });
+  }
 
+  function getVisibleEntries() {
+    return allEntries.filter(entry => {
+      const filterMatch = currentFilter === 'all' || entry.type === currentFilter;
+      const searchMatch = !currentQuery || entry.text.toLowerCase().includes(currentQuery);
+      return filterMatch && searchMatch;
+    });
+  }
 
+  function updateStatus(visibleCount) {
+    const status = $('#cgpt-toc-status');
+    if (!status) return;
 
-  // -------------------- TOC build --------------------
-  let lastKey = '';
+    const prompts = allEntries.filter(entry => entry.type === 'user').length;
+    const sections = allEntries.filter(entry => entry.type === 'assistant').length;
+    const filtered = visibleCount !== allEntries.length ? ` · ${visibleCount} shown` : '';
+    status.textContent = `${prompts} prompt${prompts === 1 ? '' : 's'} · ${sections} section${sections === 1 ? '' : 's'}${filtered}`;
+  }
 
-  function rebuildTOC() {
-    const existingPanel = $('#cgpt-toc');
+  function getConversationTurnTarget(node) {
+    if (!node) return null;
+    return node.closest('article[role="article"], [data-testid^="conversation-turn"]') || node;
+  }
+
+  function getScrollableAncestor(element) {
+    let current = element?.parentElement || null;
+
+    while (current && current !== document.documentElement) {
+      const style = getComputedStyle(current);
+      const overflowY = style.overflowY;
+      const isScrollable =
+        (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') &&
+        current.scrollHeight > current.clientHeight + 2;
+
+      if (isScrollable) return current;
+      current = current.parentElement;
+    }
+
+    return document.scrollingElement || document.documentElement;
+  }
+
+  function conversationTurnSignature(node) {
+    if (!node) return '';
+    return node.id || sanitize(node.textContent || '', 160);
+  }
+
+  async function jumpToFirstConversationTurn() {
+    let previousSignature = '';
+    let stablePasses = 0;
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const firstBlock = getAllConversationBlocks()[0]?.node;
+      const target = getConversationTurnTarget(firstBlock);
+      if (!target) return;
+
+      const signature = conversationTurnSignature(target);
+      const scroller = getScrollableAncestor(target);
+
+      try {
+        target.scrollIntoView({
+          behavior: attempt === 0 ? 'smooth' : 'auto',
+          block: 'start',
+          inline: 'nearest'
+        });
+      } catch (_) {
+        target.scrollIntoView(true);
+      }
+
+      // Push the containing chat scroller fully upward as well. This helps
+      // ChatGPT reveal older virtualized turns above the current first node.
+      if (scroller) {
+        try {
+          scroller.scrollTo({ top: 0, behavior: attempt === 0 ? 'smooth' : 'auto' });
+        } catch (_) {
+          scroller.scrollTop = 0;
+        }
+      }
+
+      await sleep(attempt === 0 ? 550 : 350);
+
+      const refreshedFirst = getConversationTurnTarget(getAllConversationBlocks()[0]?.node);
+      const refreshedSignature = conversationTurnSignature(refreshedFirst);
+      const refreshedScroller = getScrollableAncestor(refreshedFirst || target);
+      const atTop = !refreshedScroller || refreshedScroller.scrollTop <= 2;
+
+      if (refreshedSignature === signature && signature === previousSignature && atTop) {
+        stablePasses += 1;
+      } else {
+        stablePasses = 0;
+      }
+
+      previousSignature = refreshedSignature || signature;
+      if (stablePasses >= 1) break;
+    }
+
+    forceRebuild();
+
+    const firstEntry = allEntries[0];
+    const firstTarget = firstEntry ? document.getElementById(firstEntry.id) : null;
+    if (firstEntry && firstTarget) {
+      firstTarget.classList.add('cgpt-pulse');
+      setTimeout(() => firstTarget.classList.remove('cgpt-pulse'), 1200);
+      setActiveEntry(firstEntry.id);
+    }
+  }
+
+  function navigateToEntry(entry) {
+    const target = document.getElementById(entry.id);
+    if (!target) {
+      forceRebuild();
+      return;
+    }
+
+    try {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+    } catch (_) {
+      target.scrollIntoView(true);
+    }
+
+    target.classList.add('cgpt-pulse');
+    setTimeout(() => target.classList.remove('cgpt-pulse'), 1200);
+    setActiveEntry(entry.id);
+  }
+
+  function renderEntries() {
+    const list = $('#cgpt-toc-list');
+    if (!list) return;
+
+    const visibleEntries = getVisibleEntries();
+    list.innerHTML = '';
+
+    if (!allEntries.length) {
+      list.innerHTML = '<div class="cgpt-toc-empty">No conversation sections yet.</div>';
+      updateStatus(0);
+      return;
+    }
+
+    if (!visibleEntries.length) {
+      list.innerHTML = '<div class="cgpt-toc-empty">No matching entries.</div>';
+      updateStatus(0);
+      return;
+    }
+
+    const orderedList = document.createElement('ol');
+
+    visibleEntries.forEach(entry => {
+      const item = document.createElement('li');
+      item.dataset.level = String(entry.level);
+      item.dataset.entryId = entry.id;
+      item.dataset.entryType = entry.type;
+      item.title = entry.text;
+      item.textContent = entry.text;
+
+      if (entry.type === 'user') item.classList.add('cgpt-user-entry');
+      if (entry.id === activeEntryId) item.classList.add('cgpt-active-entry');
+
+      item.addEventListener('click', () => navigateToEntry(entry));
+      orderedList.append(item);
+    });
+
+    list.append(orderedList);
+    updateStatus(visibleEntries.length);
+  }
+
+  function rebuildTOC(force = false) {
+    const panel = $('#cgpt-toc');
     const isClosed = sessionStorage.getItem('cgpt_toc_closed') === '1';
 
-    if (!existingPanel && isClosed) {
+    if (!panel && isClosed) {
       showStub();
       return;
     }
 
-    const panel = existingPanel || createPanel();
-    const list = $('#cgpt-toc-list', panel);
-    if (!list) return;
+    if (!panel) createPanel();
 
-    const blocks = getAllConversationBlocks();
-    const entries = [];
+    const entries = collectEntries();
+    const key = JSON.stringify(entries.map(entry =>
+      `${entry.order}:${entry.type}:${entry.level}:${entry.text}:${entry.id}`
+    ));
 
-    blocks.forEach((item, idx) => {
-      const block = item.node;
-      const kind = item.kind;
-      const base = block.id || `cgpt-msg-${idx}`;
-      if (!block.id) block.id = base;
+    if (!force && key === lastBuildKey && allEntries.length === entries.length) return;
 
-      if (kind === 'user') {
-        const entry = findUserEntry(block);
-        const id = ensureAnchor(entry.node, `${base}-user`, 0);
-        entries.push({
-          level: 1,
-          text: entry.text,
-          id,
-          type: 'user',
-          order: idx
-        });
-      } else {
-        const heads = findAssistantHeadings(block);
-        heads.forEach((h, i) => {
-          const id = ensureAnchor(h.node, `${base}-assistant`, i);
-          entries.push({
-            level: clamp(h.level || 2, 1, 6),
-            text: h.text,
-            id,
-            type: 'assistant',
-            order: idx
-          });
-        });
+    lastBuildKey = key;
+    allEntries = entries;
+    renderEntries();
+    scheduleActiveUpdate();
+  }
+
+  function forceRebuild() {
+    lastBuildKey = '';
+    rebuildTOC(true);
+  }
+
+  // -------------------- active section tracking --------------------
+  function setActiveEntry(id) {
+    if (!id || id === activeEntryId) return;
+    activeEntryId = id;
+
+    $$('#cgpt-toc-list li[data-entry-id]').forEach(item => {
+      item.classList.toggle('cgpt-active-entry', item.dataset.entryId === id);
+    });
+
+    const activeItem = $(`#cgpt-toc-list li[data-entry-id="${CSS.escape(id)}"]`);
+    if (activeItem) {
+      activeItem.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  }
+
+  function updateActiveEntry() {
+    activeUpdatePending = false;
+    if (!allEntries.length || !$('#cgpt-toc')) return;
+
+    const topGuide = 140;
+    let selected = null;
+    let closestAbove = -Infinity;
+    let closestBelow = Infinity;
+
+    allEntries.forEach(entry => {
+      const target = document.getElementById(entry.id);
+      if (!target) return;
+      const rect = target.getBoundingClientRect();
+
+      if (rect.bottom < 0 || rect.top > window.innerHeight) return;
+
+      if (rect.top <= topGuide && rect.top > closestAbove) {
+        selected = entry;
+        closestAbove = rect.top;
+      } else if (!selected && rect.top > topGuide && rect.top < closestBelow) {
+        selected = entry;
+        closestBelow = rect.top;
       }
     });
 
-    const key = JSON.stringify(entries.map(e => `${e.order}:${e.type}:${e.level}:${e.text}:${e.id}`));
-    if (key === lastKey && list.childElementCount > 0) return;
-    lastKey = key;
+    if (selected) setActiveEntry(selected.id);
+  }
 
-    list.innerHTML = '';
+  function scheduleActiveUpdate() {
+    if (activeUpdatePending) return;
+    activeUpdatePending = true;
+    requestAnimationFrame(updateActiveEntry);
+  }
 
-    if (!entries.length) {
-      list.innerHTML = '<div style="opacity:.75">No headings yet.</div>';
-      return;
+  // -------------------- live updates and navigation --------------------
+  function mutationIsRelevant(mutation) {
+    const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
+    if (target && target.closest('#cgpt-toc, #cgpt-toc-toggle')) return false;
+
+    if (mutation.type === 'characterData') {
+      return Boolean(target?.closest('[data-message-author-role], article[role="article"], main'));
     }
 
-    const ol = document.createElement('ol');
+    return Array.from(mutation.addedNodes).some(node => {
+      if (!(node instanceof Element)) return false;
+      if (node.matches('[data-message-author-role], article[role="article"], h1, h2, h3, h4, h5, h6')) return true;
+      return Boolean(node.querySelector?.('[data-message-author-role], article[role="article"], h1, h2, h3, h4, h5, h6'));
+    }) || Boolean(target?.closest('[data-message-author-role], article[role="article"], main'));
+  }
 
-    entries.forEach(e => {
-      const li = document.createElement('li');
-      li.dataset.level = String(e.level);
-      li.title = e.text;
-      li.textContent = e.text;
+  function scheduleBuild(delay = 180) {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => rebuildTOC(false), delay);
+  }
 
-      if (e.type === 'user') {
-        li.classList.add('cgpt-user-entry');
-      }
+  function handleConversationChange() {
+    currentUrl = location.href;
+    lastBuildKey = '';
+    allEntries = [];
+    activeEntryId = '';
 
-      li.addEventListener('click', () => {
-        const target = document.getElementById(e.id);
-        if (!target) return;
+    const list = $('#cgpt-toc-list');
+    if (list) list.innerHTML = '<div class="cgpt-toc-empty">Loading conversation…</div>';
+    updateStatus(0);
 
-        try {
-          target.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
-        } catch (_) {
-          target.scrollIntoView(true);
-        }
+    scheduleBuild(100);
+    setTimeout(() => forceRebuild(), 450);
+    setTimeout(() => forceRebuild(), 1200);
+  }
 
-        target.classList.add('cgpt-pulse');
-        setTimeout(() => target.classList.remove('cgpt-pulse'), 1200);
-      });
+  function checkUrlChange() {
+    if (location.href !== currentUrl) handleConversationChange();
+  }
 
-      ol.append(li);
+  function installHistoryHooks() {
+    ['pushState', 'replaceState'].forEach(method => {
+      const original = history[method];
+      if (original.__cgptTocWrapped) return;
+
+      const wrapped = function (...args) {
+        const result = original.apply(this, args);
+        window.dispatchEvent(new Event('cgpt-toc-locationchange'));
+        return result;
+      };
+      wrapped.__cgptTocWrapped = true;
+      history[method] = wrapped;
     });
 
-    list.append(ol);
+    window.addEventListener('popstate', checkUrlChange);
+    window.addEventListener('hashchange', checkUrlChange);
+    window.addEventListener('cgpt-toc-locationchange', checkUrlChange);
+    urlPollTimer = window.setInterval(checkUrlChange, 750);
   }
 
-  // -------------------- live updates --------------------
-  let debTimer = null;
-
-  function scheduleBuild() {
-    clearTimeout(debTimer);
-    debTimer = setTimeout(rebuildTOC, 150);
-  }
-
-  async function startObserver() {
+  async function startObservers() {
     await sleep(400);
-    rebuildTOC();
+    forceRebuild();
 
     const root = document.body || document.documentElement;
-    const obs = new MutationObserver(() => scheduleBuild());
-    obs.observe(root, { childList: true, subtree: true, characterData: true });
+    chatMutationObserver = new MutationObserver(mutations => {
+      if (mutations.some(mutationIsRelevant)) scheduleBuild();
+    });
+    chatMutationObserver.observe(root, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+
+    document.addEventListener('scroll', scheduleActiveUpdate, true);
+    window.addEventListener('resize', scheduleActiveUpdate);
+    installHistoryHooks();
   }
 
   // -------------------- boot --------------------
   function boot() {
-    if (sessionStorage.getItem('cgpt_toc_closed') === '1') {
-      showStub();
-    } else {
-      createPanel();
-    }
-    startObserver();
+    if (sessionStorage.getItem('cgpt_toc_closed') === '1') showStub();
+    else createPanel();
+
+    startObservers();
   }
 
   const host = location.hostname;

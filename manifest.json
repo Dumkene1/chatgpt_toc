@@ -1,14 +1,24 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT TOC",
-  "version": "1.0.0",
-  "description": "Floating TOC for ChatGPT chats.",
-  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+  "name": "Web Browser ChatGPT TOC",
+  "version": "2.1.0",
+  "description": "A floating, searchable table of contents for ChatGPT conversations.",
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-      "js": ["content.js"],
-      "css": ["content.css"],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     }
   ]
